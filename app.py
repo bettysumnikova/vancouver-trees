@@ -22,7 +22,7 @@ st.markdown(f"""
 # --- Load CSV Data ---
 @st.cache_data
 def load_csv_data(neighbourhood):
-    df = pd.read_csv("public-trees.csv", sep=";")
+    df = pd.read_csv("data/public-trees.csv", sep=";")
     df = df[df["NEIGHBOURHOOD_NAME"].str.upper() == neighbourhood.upper()]
     return df
 
