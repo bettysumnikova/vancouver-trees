@@ -9,6 +9,15 @@ A simple interactive app that displays trees in Vancouver using live data from t
 - Highlight one species and view a Wikipedia link
 - Displays summary charts for tree types and height distribution
 
+## How to Run
+
+Clone the repo and run the app:
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
 ## Technologies Used
 
 - Streamlit
