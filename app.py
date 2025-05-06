@@ -103,7 +103,7 @@ def create_map(df, highlight=None):
 
 # --- UI Layout ---
 st.title("🌳 Vancouver Trees Dashboard")
-data_source = st.selectbox("Select Data Source", ["", "CSV", "API"])
+data_source = st.selectbox("Select Data Source", ["", "CSV (faster, local file)", "API (live city data)"])
 neighbourhoods = ["", "ARBUTUS RIDGE", "DOWNTOWN", "DUNBAR-SOUTHLANDS", "FAIRVIEW",
     "GRANDVIEW-WOODLAND", "HASTINGS-SUNRISE", "KENSINGTON-CEDAR COTTAGE", "KERRISDALE",
     "KILLARNEY", "KITSILANO", "MARPOLE", "MOUNT PLEASANT", "OAKRIDGE", "RENFREW-COLLINGWOOD",
