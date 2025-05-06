@@ -1,193 +1,256 @@
 import streamlit as st
-import pandas as pd
 import requests
 import folium
 from streamlit_folium import st_folium
-import altair as alt
+import time
 from datetime import datetime
+import pandas as pd
+import altair as alt
 
-# --- Dashboard Configuration ---
+# --- Dashboard Styles ---
 st.set_page_config(page_title="Tree Dashboard", layout="wide")
 PRIMARY_COLOR = "#A7C7E7"
 DARK_COLOR = "#2C2C2C"
 
 st.markdown(f"""
     <style>
-    .stApp {{ background-color: white; color: {DARK_COLOR}; }}
-    .stButton>button {{ background-color: {PRIMARY_COLOR}; color: black; font-weight: 600; }}
-    .stButton>button:hover {{ background-color: #8bb2da; color: black; }}
+    .stApp {{
+        background-color: white;
+        color: {DARK_COLOR};
+    }}
+    .block-container {{
+        padding-top: 2rem;
+    }}
+    .stButton>button {{
+        background-color: {PRIMARY_COLOR};
+        color: black;
+        border: none;
+        border-radius: 5px;
+        padding: 0.4rem 1rem;
+        font-weight: 600;
+    }}
+    .stButton>button:hover {{
+        background-color: #8bb2da;
+        color: black;
+    }}
     </style>
 """, unsafe_allow_html=True)
 
-# --- Load CSV Data ---
-@st.cache_data
-def load_csv_data(neighbourhood):
-    df = pd.read_csv("public-trees.csv", sep=";")
-    df = df[df["NEIGHBOURHOOD_NAME"].str.upper() == neighbourhood.upper()]
-    return df
-
-# --- Fetch API Data ---
+# --- Data Fetching and Processing ---
 @st.cache_data(ttl=3600)
-def fetch_api_data(neighbourhood):
+def fetch_neighbourhood_tree_data(neighbourhood):
     base_url = "https://opendata.vancouver.ca"
-    api_path = "/api/explore/v2.1/catalog/datasets/public-trees/records"
+    api_base_path = "/api/explore/v2.1/catalog/datasets"
+    dataset_id = "public-trees"
+    records_endpoint = f"{api_base_path}/{dataset_id}/records"
     all_results = []
-    offset, limit, MAX = 0, 100, 10000
-    while offset < MAX:
-        url = f"{base_url}{api_path}?limit={limit}&offset={offset}&where=neighbourhood_name='{neighbourhood}'"
+    offset = 0
+    limit = 100
+    MAX_OFFSET = 10000  # Prevent 400 error
+
+    neighbourhood = neighbourhood.upper()
+    st.info(f"Fetching all tree data for {neighbourhood} in batches...")
+    progress_bar = st.progress(0.0)
+
+    total_count = None
+    while offset < MAX_OFFSET:
+        url = f"{base_url}{records_endpoint}?limit={limit}&offset={offset}&where=neighbourhood_name='{neighbourhood}'"
         try:
             response = requests.get(url)
             response.raise_for_status()
             data = response.json()
             results = data.get('results', [])
             all_results.extend(results)
-            if len(results) < limit:
+
+            if total_count is None:
+                total_count = data.get('total_count', 0)
+                if total_count == 0:
+                    st.info(f"No tree records found for {neighbourhood}.")
+                    break
+
+            if len(results) == 0 or len(all_results) >= total_count:
+                st.success(f"Fetched {len(all_results)} tree records for {neighbourhood}.")
                 break
+
             offset += limit
+            progress_bar.progress(min(1.0, offset / total_count))
+            time.sleep(0.1)
+
         except Exception as e:
-            st.error(f"API Error: {e}")
+            st.error(f"Error: {e}")
             break
-    return pd.json_normalize(all_results)
 
-# --- Parse Data ---
-def parse_data(df):
-    # Normalize column names to uppercase
-    df.columns = [col.upper() for col in df.columns]
+    progress_bar.empty()
 
-    # Location parsing
-    if 'GEO_POINT_2D' in df.columns:
-        coords = df['GEO_POINT_2D'].str.split(',', expand=True)
-        df['LATITUDE'] = pd.to_numeric(coords[0], errors='coerce')
-        df['LONGITUDE'] = pd.to_numeric(coords[1], errors='coerce')
-    elif 'GEOM.GEOMETRY.COORDINATES' in df.columns:
-        df['LATITUDE'] = df['GEOM.GEOMETRY.COORDINATES'].apply(lambda x: x[1] if isinstance(x, list) and len(x) == 2 else None)
-        df['LONGITUDE'] = df['GEOM.GEOMETRY.COORDINATES'].apply(lambda x: x[0] if isinstance(x, list) and len(x) == 2 else None)
-    else:
-        df['LATITUDE'] = None
-        df['LONGITUDE'] = None
+    if offset >= MAX_OFFSET:
+        st.warning("⚠️ API limit reached: only the first 10,000 tree records are shown.")
 
-    # Standardize and fill missing fields
-    df['COMMON_NAME'] = df['COMMON_NAME'].fillna('Unknown') if 'COMMON_NAME' in df else 'Unknown'
-    df['SPECIES_NAME'] = df['SPECIES_NAME'].fillna('Unknown') if 'SPECIES_NAME' in df else 'Unknown'
-    df['HEIGHT_RANGE'] = df['HEIGHT_RANGE'].fillna('Unknown') if 'HEIGHT_RANGE' in df else 'Unknown'
-    df['DIAMETER'] = pd.to_numeric(df['DIAMETER'], errors='coerce') if 'DIAMETER' in df else None
-    df['DATE_PLANTED'] = pd.to_datetime(df['DATE_PLANTED'], errors='coerce') if 'DATE_PLANTED' in df else None
-    df['PLANT_YEAR'] = df['DATE_PLANTED'].apply(lambda x: x.year if pd.notnull(x) else None)
+    return all_results
 
-    # Assign lowercase columns for UI
-    df['common_name'] = df['COMMON_NAME']
-    df['species_name'] = df['SPECIES_NAME']
-    df['height_range'] = df['HEIGHT_RANGE']
-    df['diameter'] = df['DIAMETER']
-    df['plant_date'] = df['DATE_PLANTED']
-    df['plant_year'] = df['PLANT_YEAR']
-    df['latitude'] = df['LATITUDE']
-    df['longitude'] = df['LONGITUDE']
+@st.cache_data(ttl=3600)
+def process_tree_data(trees_data):
+    processed = []
+    for tree in trees_data:
+        try:
+            geometry = tree.get('geom', {}).get('geometry')
+            if geometry and geometry.get('type') == 'Point':
+                coords = geometry.get('coordinates', [None, None])
+                if None in coords:
+                    continue
+                processed.append({
+                    'latitude': coords[1],
+                    'longitude': coords[0],
+                    'common_name': tree.get('common_name') or 'Unknown',
+                    'species_name': tree.get('species_name') or 'Unknown',
+                    'height_range': tree.get('height_range') or 'Unknown',
+                    'diameter': pd.to_numeric(tree.get('diameter'), errors='coerce'),
+                    'plant_date': tree.get('date_planted'),
+                    'neighbourhood': tree.get('neighbourhood_name') or 'Unknown'
+                })
+        except Exception as e:
+            st.warning(f"Error processing tree: {e}")
+    return pd.DataFrame(processed)
 
-    return df.dropna(subset=['latitude', 'longitude'])
-
-# --- Create Map ---
-def create_map(df, highlight=None):
-    if df.empty:
-        return folium.Map(location=[49.2827, -123.1207], zoom_start=12)
-    m = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=14, tiles="CartoDB Positron")
-    for _, row in df.iterrows():
-        if pd.notnull(row['latitude']) and pd.notnull(row['longitude']):
-            color = PRIMARY_COLOR if highlight and row['common_name'] == highlight else 'green'
-            tooltip = f"<b>{row['common_name']}</b><br>Species: {row['species_name']}<br>Planted: {row['plant_date'].date() if pd.notnull(row['plant_date']) else 'Unknown'}"
-            folium.CircleMarker(
-                location=[row['latitude'], row['longitude']],
-                radius=6, color=color, fill=True, fill_color=color, fill_opacity=0.7, tooltip=tooltip
-            ).add_to(m)
+def create_tree_map(trees, center, zoom, highlight_species=None):
+    m = folium.Map(location=center, zoom_start=zoom, tiles="CartoDB Positron")
+    for _, tree in trees.iterrows():
+        is_highlighted = highlight_species and tree['common_name'] == highlight_species
+        color = PRIMARY_COLOR if is_highlighted else 'green'
+        fill_opacity = 0.9 if is_highlighted else 0.5
+        tooltip = f"<b>{tree['common_name']}</b><br>Species: {tree['species_name']}<br>Planted: {tree['plant_date'] or 'Unknown'}"
+        folium.CircleMarker(
+            location=[tree['latitude'], tree['longitude']],
+            radius=6 if is_highlighted else 4,
+            color=color,
+            fill=True,
+            fill_color=color,
+            fill_opacity=fill_opacity,
+            tooltip=tooltip
+        ).add_to(m)
     return m
 
-# --- UI Layout ---
-st.title("🌳 Vancouver Trees Dashboard")
-data_source = st.selectbox("Select Data Source", ["", "CSV", "API"])
-neighbourhoods = ["", "ARBUTUS RIDGE", "DOWNTOWN", "DUNBAR-SOUTHLANDS", "FAIRVIEW",
-    "GRANDVIEW-WOODLAND", "HASTINGS-SUNRISE", "KENSINGTON-CEDAR COTTAGE", "KERRISDALE",
-    "KILLARNEY", "KITSILANO", "MARPOLE", "MOUNT PLEASANT", "OAKRIDGE", "RENFREW-COLLINGWOOD",
-    "RILEY PARK", "SHAUGHNESSY", "SOUTH CAMBIE", "STRATHCONA", "SUNSET", "VICTORIA-FRASERVIEW",
-    "WEST END", "WEST POINT GREY"]
-selected = st.selectbox("Select Neighbourhood", neighbourhoods)
+def filters_active(selected_names, selected_heights, min_diameter, selected_year, min_year):
+    return (
+        selected_names or
+        selected_heights or
+        min_diameter > 0 or
+        selected_year > min_year
+    )
 
-if data_source and selected:
-    with st.spinner("Loading data..."):
-        df = load_csv_data(selected) if data_source == "CSV" else fetch_api_data(selected)
-        df = parse_data(df)
+# --- App Main ---
+def main():
+    st.title("🌳 Vancouver Trees")
 
-    df_clean = df.copy()
-    st.sidebar.header("🔍 Filters")
-    clear = st.sidebar.button("Clear All Filters")
+    neighbourhoods = [
+        "", "ARBUTUS RIDGE", "DOWNTOWN", "DUNBAR-SOUTHLANDS", "FAIRVIEW",
+        "GRANDVIEW-WOODLAND", "HASTINGS-SUNRISE", "KENSINGTON-CEDAR COTTAGE",
+        "KERRISDALE", "KILLARNEY", "KITSILANO", "MARPOLE", "MOUNT PLEASANT",
+        "OAKRIDGE", "RENFREW-COLLINGWOOD", "RILEY PARK", "SHAUGHNESSY",
+        "SOUTH CAMBIE", "STRATHCONA", "SUNSET", "VICTORIA-FRASERVIEW",
+        "WEST END", "WEST POINT GREY"
+    ]
 
-    # Setup filters
-    common_names = sorted(df_clean['common_name'].unique())
-    height_ranges = sorted(df_clean['height_range'].unique())
-    min_diam_val = df_clean['diameter'].min(skipna=True)
-    max_diam_val = df_clean['diameter'].max(skipna=True)
-    min_year_val = df_clean['plant_year'].min(skipna=True)
-    max_year_val = df_clean['plant_year'].max(skipna=True)
+    selected = st.selectbox("Select Neighbourhood", neighbourhoods)
 
-    min_diam = int(min_diam_val) if pd.notnull(min_diam_val) else 0
-    max_diam = int(max_diam_val) if pd.notnull(max_diam_val) else 100
-    min_year = int(min_year_val) if pd.notnull(min_year_val) else 2000
-    max_year = int(max_year_val) if pd.notnull(max_year_val) else datetime.now().year
+    if not selected:
+        st.info("Please select a neighbourhood to begin.")
+        return
 
-    selected_names = st.sidebar.multiselect("Tree Type", common_names) if not clear else []
-    selected_heights = st.sidebar.multiselect("Height Range", height_ranges) if not clear else []
-    min_diameter = st.sidebar.slider("Minimum Diameter", min_diam, max_diam, min_diam) if not clear else min_diam
-    selected_year = st.sidebar.slider("Planted After Year", min_year, max_year, min_year) if not clear else min_year
+    if 'last_neighbourhood' not in st.session_state or st.session_state.last_neighbourhood != selected:
+        st.session_state.last_neighbourhood = selected
+        raw_data = fetch_neighbourhood_tree_data(selected)
+        st.session_state.trees_df = process_tree_data(raw_data)
 
-    # Apply filters
-    if selected_names or selected_heights or min_diameter > min_diam or selected_year > min_year:
-        df_filtered = df[df['diameter'].notnull() & df['plant_year'].notnull()].copy()
+    df = st.session_state.trees_df.copy()
+    df['common_name'] = df['common_name'].str.upper().str.strip()
+    df['plant_year'] = pd.to_datetime(df['plant_date'], errors='coerce').dt.year
+    df['diameter'] = df['diameter'].fillna(0)
+
+    with st.sidebar:
+        st.header("🔍 Filters")
+        min_year = int(df['plant_year'].min(skipna=True) or 2000)
+        max_year = int(df['plant_year'].max(skipna=True) or datetime.now().year)
+
+        clear = st.button("Clear All Filters")
+        if clear:
+            st.session_state['selected_names'] = []
+            st.session_state['selected_heights'] = []
+            st.session_state['min_diameter'] = 0
+            st.session_state['selected_year'] = min_year
+
+        selected_names = st.multiselect("Tree Type", sorted(df['common_name'].dropna().unique()), key="selected_names")
+        min_diameter = st.slider("Minimum Diameter (cm)", 0, int(df['diameter'].max()), 0, key="min_diameter")
+        selected_heights = st.multiselect("Height Range", sorted(df['height_range'].dropna().unique()), key="selected_heights")
+        selected_year = st.slider("Planted After Year", min_year, max_year, min_year, key="selected_year")
+
+    # Apply filters only if actively used
+    if filters_active(selected_names, selected_heights, min_diameter, selected_year, min_year):
+        filtered_df = df.copy()
         if selected_names:
-            df_filtered = df_filtered[df_filtered['common_name'].isin(selected_names)]
+            filtered_df = filtered_df[filtered_df['common_name'].isin(selected_names)]
         if selected_heights:
-            df_filtered = df_filtered[df_filtered['height_range'].isin(selected_heights)]
-        df_filtered = df_filtered[df_filtered['diameter'] >= min_diameter]
-        df_filtered = df_filtered[df_filtered['plant_year'] >= selected_year]
+            filtered_df = filtered_df[filtered_df['height_range'].isin(selected_heights)]
+        filtered_df = filtered_df[filtered_df['diameter'] >= min_diameter]
+        filtered_df = filtered_df[filtered_df['plant_year'].fillna(0).astype(int) >= selected_year]
     else:
-        df_filtered = df
+        filtered_df = df.copy()
 
-    st.subheader(f"🌲 Showing {len(df_filtered)} Trees in {selected}")
-    if df_filtered.empty:
-        st.info("No trees match the selected filters.")
-    else:
-        st_folium(create_map(df_filtered), width=700, height=500, key="filtered-map")
+    st.subheader(f"🌲 Showing {len(filtered_df)} Trees in {selected}")
 
-        st.markdown("### 📊 Statistics")
-        avg_diameter = df_filtered['diameter'].mean()
-        oldest = df_filtered['plant_year'].min()
-        newest = df_filtered['plant_year'].max()
+    if not filtered_df.empty:
+        center_lat = filtered_df['latitude'].mean()
+        center_lon = filtered_df['longitude'].mean()
+
+        # Initial map (no spotlight)
+        m = create_tree_map(filtered_df, [center_lat, center_lon], 14)
+        st_folium(m, width=700, height=500)
+
+        st.markdown("### 📊 Tree Statistics")
+        avg_diameter = filtered_df['diameter'].mean()
+        oldest_year = filtered_df['plant_year'].min()
+        newest_year = filtered_df['plant_year'].max()
 
         k1, k2, k3 = st.columns(3)
-        k1.metric("Average Diameter", f"{avg_diameter:.1f} in")
-        k2.metric("Oldest Year", f"{int(oldest) if pd.notnull(oldest) else 'Unknown'}")
-        k3.metric("Newest Year", f"{int(newest) if pd.notnull(newest) else 'Unknown'}")
+        k1.metric("Average Diameter (cm)", f"{avg_diameter:.1f}")
+        k2.metric("Oldest Tree Planted", f"{int(oldest_year) if pd.notnull(oldest_year) else 'Unknown'}")
+        k3.metric("Most Recently Planted", f"{int(newest_year) if pd.notnull(newest_year) else 'Unknown'}")
 
-        st.markdown("### Tree Distributions")
+        tree_counts = filtered_df['common_name'].value_counts().nlargest(10).reset_index()
+        tree_counts.columns = ['Tree Type', 'Count']
+        chart1 = alt.Chart(tree_counts).mark_bar(color=PRIMARY_COLOR).encode(
+            x=alt.X('Count:Q', title='Tree Count'),
+            y=alt.Y('Tree Type:N', sort='-x', title='Tree Type')
+        ).properties(title='Top 10 Tree Types')
+
+        height_counts = filtered_df['height_range'].value_counts().reset_index()
+        height_counts.columns = ['Height Range', 'Count']
+        chart2 = alt.Chart(height_counts).mark_bar(color=PRIMARY_COLOR).encode(
+            x=alt.X('Count:Q', title='Tree Count'),
+            y=alt.Y('Height Range:N', sort='-x', title='Height Range')
+        ).properties(title='Height Range Distribution')
+
         col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Top Tree Types**")
-            chart_data = df_filtered['common_name'].value_counts().nlargest(10).reset_index()
-            chart_data.columns = ['Tree Type', 'Count']
-            st.altair_chart(alt.Chart(chart_data).mark_bar(color=PRIMARY_COLOR).encode(
-                x='Count:Q', y=alt.Y('Tree Type:N', sort='-x')), use_container_width=True)
+        col1.altair_chart(chart1, use_container_width=True)
+        col2.altair_chart(chart2, use_container_width=True)
 
-        with col2:
-            st.markdown("**Height Range Distribution**")
-            height_data = df_filtered['height_range'].value_counts().reset_index()
-            height_data.columns = ['Height Range', 'Count']
-            st.altair_chart(alt.Chart(height_data).mark_bar(color=PRIMARY_COLOR).encode(
-                x='Count:Q', y=alt.Y('Height Range:N', sort='-x')), use_container_width=True)
-
+        # --- Tree Spotlight at the Bottom ---
+        st.markdown("---")
         st.markdown("### 📚 Tree Spotlight")
-        spotlight = st.selectbox("Highlight a Tree", [""] + df_filtered['common_name'].unique().tolist())
-        if spotlight:
-            spotlight_df = df_filtered[df_filtered['common_name'] == spotlight]
-            if not spotlight_df.empty:
-                info = spotlight_df.iloc[0]
-                wiki = info['species_name'].replace(" ", "_")
-                st.markdown(f"**Common Name:** {spotlight}<br>**Latin Name:** *{info['species_name']}*<br>[Learn more on Wikipedia](https://en.wikipedia.org/wiki/{wiki})", unsafe_allow_html=True)
-                st_folium(create_map(df_filtered, spotlight), width=700, height=500, key="spotlight-map")
+
+        edu_trees = sorted(filtered_df['common_name'].dropna().unique())
+        highlighted_species = st.selectbox("Highlight a Tree (optional)", [""] + edu_trees)
+
+        if highlighted_species:
+            latin_name = filtered_df[filtered_df['common_name'] == highlighted_species]['species_name'].iloc[0]
+            wiki_url = f"https://en.wikipedia.org/wiki/{latin_name.replace(' ', '_')}"
+            st.markdown(f"""
+                **Common Name:** {highlighted_species}  
+                **Latin Name:** *{latin_name}*  
+                [Learn more on Wikipedia]({wiki_url})
+            """)
+            # Redraw map with spotlight
+            m = create_tree_map(filtered_df, [center_lat, center_lon], 14, highlight_species=highlighted_species)
+            st_folium(m, width=700, height=500)
+
+if __name__ == "__main__":
+    main()
