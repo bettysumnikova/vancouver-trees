@@ -113,7 +113,11 @@ selected = st.selectbox("Select Neighbourhood", neighbourhoods)
 
 if data_source and selected:
     with st.spinner("Loading data..."):
-        df = load_csv_data(selected) if data_source == "CSV" else fetch_api_data(selected)
+        if "CSV" in data_source:
+            df = load_csv_data(selected)
+        elif "API" in data_source:
+            df = fetch_api_data(selected)
+
         df = parse_data(df)
 
     df_clean = df.copy()
