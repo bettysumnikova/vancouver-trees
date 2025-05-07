@@ -13,11 +13,17 @@ DARK_COLOR = "#2C2C2C"
 
 st.markdown(f"""
     <style>
-    .stApp {{ background-color: white; color: {DARK_COLOR}; }}
-    .stButton>button {{ background-color: {PRIMARY_COLOR}; color: black; font-weight: 600; }}
-    .stButton>button:hover {{ background-color: #8bb2da; color: black; }}
+    .element-container .stMetric label {{
+        color: {DARK_COLOR};
+        font-weight: 600;
+    }}
+    .element-container .stMetric div {{
+        color: {DARK_COLOR};
+        font-size: 1.3em;
+    }}
     </style>
 """, unsafe_allow_html=True)
+
 
 # --- Load CSV Data ---
 @st.cache_data
